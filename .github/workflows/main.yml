@@ -1,0 +1,58 @@
+name: Build A
+
+on:
+  workflow_dispatch:   # Cho phép chạy thủ công từ tab Actions
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      repository-projects: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Configure MSVC and Build
+      shell: cmd
+      run: |
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+        cl /EHsc /O2 /DNDEBUG /MD a.cpp /link winmm.lib ole32.lib mmdevapi.lib /MACHINE:X64 /OUT:a.exe
+
+    - name: List directory for debugging
+      shell: cmd
+      run: dir
+
+    # Xóa tag và release cũ (nếu có)
+    - name: Delete-tag-and-release
+      uses: dev-drprasad/delete-tag-and-release@v1.1
+      with:
+        tag_name: ABuild
+        delete_release: true
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+
+    # Tạo release mới
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@latest
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ABuild
+        release_name: ABuild
+        body: "Release created by GitHub Actions (manual build)"
+        draft: false
+        prerelease: false
+
+    # Upload file a.exe lên release
+    - name: Upload Release Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: a.exe
+        asset_name: a.exe
+        asset_content_type: application/octet-stream
