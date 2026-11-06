@@ -28,6 +28,7 @@
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "bcrypt.lib")
+#pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "crypt32.lib")
 
 namespace fs = std::filesystem;
